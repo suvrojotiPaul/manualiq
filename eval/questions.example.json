@@ -1,0 +1,15 @@
+[
+  {
+    "id": "q01",
+    "topic": "wiring",
+    "question": "On the ClimaTrol 24 controller, should I connect my alarm system to the NO or the NC terminal of the alarm relay?",
+    "source": { "manual": "CT-00580 REV05 (ClimaTrol 24 User Guide)", "pages": "12", "also": "" },
+    "sections": ["CT-00580_ClimaTrol24_User_Guide#s9"],
+    "facts": [
+      "The alarm relay has three terminals: NO, C (common) and NC",
+      "Use NC for an alarm system that triggers when current to its input is cut off",
+      "Use NO for an alarm system that triggers when current is supplied to its input"
+    ],
+    "traps": ["Answering for the ClimaTrol 22, whose relay is labelled differently"]
+  }
+]

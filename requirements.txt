@@ -1,0 +1,5 @@
+# Python side: PDF parsing, page images, local embeddings (CPU, no GPU needed)
+pdfplumber>=0.11
+pypdfium2>=4.30
+fastembed>=0.5
+numpy>=1.26

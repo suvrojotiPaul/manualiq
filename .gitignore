@@ -1,0 +1,23 @@
+data/
+.venv/
+node_modules/
+__pycache__/
+*.pyc
+.env
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.sql
+.env.*
+!.env.example
+# your own test set and results (company/personal data)
+eval/questions.json
+eval/answers/
+eval/results/
+eval/report.md
+eval/ASK_THESE.md
+# documents never go in git
+*.pdf
+.claude/settings.local.json

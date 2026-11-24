@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{APP_NAME}}</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script type="module" src="/static/vendor/datastar.js"></script>
+</head>
+<body data-signals="{chatId: '', question: '', busy: false, panel: false, nsources: 0}">
+  <header class="top">
+    <div class="brand"><span class="logo">▣</span> {{APP_NAME}}</div>
+    <div class="topbtns">
+      <button class="ghost" data-on:click="$panel = !$panel" data-class:on="$panel">Sources<span data-show="$nsources > 0" data-text="' · ' + $nsources"></span></button>
+      <button class="ghost" data-on:click="@post('/new')" data-attr:disabled="$busy">New chat</button>
+    </div>
+  </header>
+
+  <!-- sources drawer: upload manuals (PDF) and databases (.sqlite/.db/.sql), see what is loaded, remove uploads -->
+  <aside id="panel" class="panel" data-show="$panel" data-init="@get('/sources')">
+    <div class="panel-head"><strong>Sources</strong><button class="icon" title="Close" data-on:click="$panel = false">✕</button></div>
+    <label class="dropzone" id="dropzone">
+      <input type="file" id="files" multiple accept=".pdf,.sqlite,.sqlite3,.db,.sql" hidden>
+      <span><strong>Drop files here</strong> or click to choose</span>
+      <span class="muted small">Manuals: .pdf · Databases: .sqlite, .db, or .sql dumps (SQLite, PostgreSQL, MySQL, SQL Server)</span>
+    </label>
+    <div id="uploads"></div>
+    <div id="uperr"></div>
+    <div id="sources"><p class="muted small">Loading…</p></div>
+    <!-- uploads finish in plain JS (XHR progress), then this hands the ids to the server, which streams progress back -->
+    <div hidden data-on:ingest__window="@post('/ingest?cids=' + evt.detail.cids, {requestCancellation: 'disabled'})"></div>
+  </aside>
+  <div id="dragover" class="dragover" hidden><div>Drop to add to the sources</div></div>
+
+  <main id="scroller">
+    <section class="welcome">
+      <h1>Ask about your manuals and your data.</h1>
+      <p class="muted">Answers come from the documents you add, with page references, or from a database you add (the SQL is always shown). Add files under <em>Sources</em>. Not quite right? Use <em>More detail</em>, <em>Shorter</em> or <em>Not what I meant</em>.</p>
+      <div class="examples">{{SAMPLE_CHIPS}}</div>
+    </section>
+    <div id="messages"></div>
+  </main>
+
+  <footer class="composer">
+    <form data-on:submit__prevent="$question.trim() && !$busy && @post('/chat')">
+      <button type="button" id="attach" class="icon mic" title="Add a manual (PDF) or a database (.sqlite, .db, .sql)">📎</button>
+      <button type="button" id="mic" class="icon mic" title="Speak your question" hidden>🎤</button>
+      <textarea id="q" rows="1" placeholder="Ask about a product, model number, part number…" autocomplete="off"
+                enterkeyhint="send" data-bind:question data-attr:disabled="$busy"></textarea>
+      <button type="submit" class="send" data-attr:disabled="$busy || !$question.trim()">
+        <span data-show="!$busy">Ask</span><span data-show="$busy">…</span>
+      </button>
+    </form>
+  </footer>
+
+  <!-- page viewer: opens for citation links and page previews (anything with data-pg) -->
+  <div id="viewer" class="viewer" hidden>
+    <div class="vbar">
+      <span id="vlabel" class="vlabel"></span>
+      <button type="button" id="vprev" class="vbtn" title="Previous page">&lsaquo;</button>
+      <button type="button" id="vnext" class="vbtn" title="Next page">&rsaquo;</button>
+      <a id="vpdf" class="vbtn" target="_blank" rel="noopener">PDF</a>
+      <button type="button" id="vclose" class="vbtn" title="Close">&#x2715;</button>
+    </div>
+    <div id="vscroll" class="vscroll"><div id="vmsg" class="vmsg muted">Loading page&hellip;</div><img id="vimg" alt=""></div>
+  </div>
+
+  <script>
+    // question box: grows with the text (up to ~40% of the screen, then scrolls); Enter sends, Shift+Enter = new line
+    const qbox = document.getElementById('q');
+    let qLast = null;
+    function fitQuestion() {
+      qLast = qbox.value;
+      qbox.style.height = 'auto';
+      qbox.style.height = Math.min(qbox.scrollHeight + 2, Math.round(window.innerHeight * 0.4)) + 'px';
+    }
+    qbox.addEventListener('input', fitQuestion);
+    window.addEventListener('resize', fitQuestion);
+    setInterval(() => { if (qbox.value !== qLast) fitQuestion(); }, 250); // the server clears the box after Ask
+    qbox.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); qbox.form.requestSubmit(); }
+    });
+
+    // keep the newest message in view
+    const scroller = document.getElementById('scroller');
+    new MutationObserver(() => {
+      const nearBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 200;
+      if (nearBottom || document.querySelector('.msg.bot:last-child .status:not(.hidden)')) scroller.scrollTop = scroller.scrollHeight;
+    }).observe(document.getElementById('messages').parentElement, { childList: true, subtree: true, characterData: true });
+
+    // voice input (browser speech recognition: Chrome, Edge, Safari). Tap the mic to start, tap again to stop.
+    // It keeps listening through pauses (restarts itself when the browser ends a session after silence)
+    // and never sends: the words go into the box and you press Ask.
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const mic = document.getElementById('mic');
+    const input = document.getElementById('q');
+    if (SR) {
+      mic.hidden = false;
+      let rec = null, listening = false, before = '', finalText = '';
+      const join = (...parts) => parts.map(p => (p || '').trim()).filter(Boolean).join(' ');
+      const setBox = text => {
+        input.value = text;
+        input.dispatchEvent(new Event('input', { bubbles: true })); // updates $question, enables Ask
+      };
+      const stop = () => {
+        listening = false;
+        mic.classList.remove('on'); mic.title = 'Speak your question';
+        if (rec) { rec.onend = null; try { rec.stop(); } catch {} rec = null; }
+        setBox(join(before, finalText));
+        input.focus();
+      };
+      const startSession = () => {
+        rec = new SR();
+        rec.lang = navigator.language || 'en-US';
+        rec.continuous = true;
+        rec.interimResults = true;
+        rec.onresult = e => {
+          let interim = '';
+          for (let i = e.resultIndex; i < e.results.length; i++) {
+            const r = e.results[i];
+            if (r.isFinal) finalText = join(finalText, r[0].transcript); else interim = join(interim, r[0].transcript);
+          }
+          setBox(join(before, finalText, interim));
+        };
+        rec.onerror = e => {
+          if (['not-allowed', 'service-not-allowed', 'audio-capture'].includes(e.error)) {
+            stop();
+            alert('The microphone is not available here. On a phone the browser only allows it over https; you can use the keyboard\'s mic button instead.');
+          }
+        };
+        rec.onend = () => { if (listening) { try { startSession(); } catch { stop(); } } };
+        rec.start();
+      };
+      mic.addEventListener('click', () => {
+        if (listening) { stop(); return; }
+        listening = true; before = input.value; finalText = '';
+        mic.classList.add('on'); mic.title = 'Listening, tap to stop';
+        try { startSession(); } catch { stop(); }
+      });
+      // pressing Ask (or Enter) while listening stops the mic first
+      input.form.addEventListener('submit', () => { if (listening) stop(); }, true);
+    }
+
+    // ---- uploads: drop anywhere / file picker / 📎 -> XHR upload (shows %) -> 'ingest' event -> Datastar @post('/ingest')
+    const fileInput = document.getElementById('files');
+    const uploadsEl = document.getElementById('uploads');
+    const OK_EXT = /\.(pdf|sqlite|sqlite3|db|sql)$/i;
+    const openPanel = () => { if (getComputedStyle(document.getElementById('panel')).display === 'none') document.querySelector('.topbtns .ghost').click(); };
+    const esc = s => s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+    function line(cid, name, text, cls = 'busy') {
+      let el = document.getElementById('up-' + cid);
+      if (!el) { el = document.createElement('div'); el.id = 'up-' + cid; uploadsEl.prepend(el); }
+      el.className = 'upitem ' + cls;
+      el.innerHTML = `<span class="upname">${esc(name)}</span><span class="upstage">${esc(text)}</span>`;
+    }
+    function uploadOne(file) {
+      const cid = Math.random().toString(36).slice(2, 12).padEnd(8, '0');
+      return new Promise(resolve => {
+        if (!OK_EXT.test(file.name)) { line(cid, file.name, 'Not supported: use .pdf, .sqlite, .db or .sql', 'err'); return resolve(null); }
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', `/upload?name=${encodeURIComponent(file.name)}&cid=${cid}`);
+        xhr.upload.onprogress = e => { if (e.lengthComputable) line(cid, file.name, `Uploading ${Math.round(100 * e.loaded / e.total)}%`); };
+        xhr.onload = () => {
+          let r = {}; try { r = JSON.parse(xhr.responseText); } catch {}
+          if (xhr.status === 200 && r.ok) { line(cid, file.name, 'Uploaded, waiting…'); resolve(cid); }
+          else { line(cid, file.name, r.error || `Upload failed (${xhr.status})`, 'err'); resolve(null); }
+        };
+        xhr.onerror = () => { line(cid, file.name, 'Upload failed', 'err'); resolve(null); };
+        line(cid, file.name, 'Uploading…');
+        xhr.send(file);
+      });
+    }
+    async function uploadFiles(files) {
+      if (!files.length) return;
+      openPanel();
+      const cids = [];
+      for (const f of files) { const cid = await uploadOne(f); if (cid) cids.push(cid); }
+      if (cids.length) window.dispatchEvent(new CustomEvent('ingest', { detail: { cids: cids.join(',') } }));
+    }
+    fileInput.addEventListener('change', () => { uploadFiles([...fileInput.files]); fileInput.value = ''; });
+    document.getElementById('attach').addEventListener('click', () => fileInput.click());
+    const dragEl = document.getElementById('dragover');
+    let dragDepth = 0;
+    const hasFiles = e => [...(e.dataTransfer?.types || [])].includes('Files');
+    window.addEventListener('dragenter', e => { if (hasFiles(e)) { dragDepth++; dragEl.hidden = false; } });
+    window.addEventListener('dragleave', e => { if (hasFiles(e) && --dragDepth <= 0) { dragDepth = 0; dragEl.hidden = true; } });
+    window.addEventListener('dragover', e => { if (hasFiles(e)) e.preventDefault(); });
+    window.addEventListener('drop', e => {
+      if (!hasFiles(e)) return;
+      e.preventDefault(); dragDepth = 0; dragEl.hidden = true;
+      uploadFiles([...e.dataTransfer.files]);
+    });
+
+    // page viewer: citation links, page previews and source links carry data-pg="id|page|total|file|label"
+    const viewer = document.getElementById('viewer');
+    const vimg = document.getElementById('vimg'), vmsg = document.getElementById('vmsg');
+    const vscroll = document.getElementById('vscroll');
+    const $id = x => document.getElementById(x);
+    let cur = null;
+    function showPage(ref, page) {
+      cur = { ...ref, page };
+      vimg.classList.remove('zoomed');
+      vmsg.textContent = 'Loading page…'; vmsg.hidden = false;
+      vimg.src = `/page/${encodeURIComponent(ref.id)}/${page}.webp`;
+      $id('vlabel').textContent = `${ref.label} · page ${page}${ref.total ? ` of ${ref.total}` : ''}`;
+      $id('vpdf').href = `/pdf/${encodeURIComponent(ref.file)}#page=${page}`;
+      $id('vprev').disabled = page <= 1;
+      $id('vnext').disabled = !!ref.total && page >= ref.total;
+      vscroll.scrollTo(0, 0);
+    }
+    vimg.onload = () => { vmsg.hidden = true; };
+    vimg.onerror = () => { if (cur) { vmsg.textContent = 'Could not load this page. Tap PDF to open the file.'; vmsg.hidden = false; } };
+    vimg.addEventListener('click', () => vimg.classList.toggle('zoomed')); // tap: fit width <-> full size
+    const closeViewer = () => { viewer.hidden = true; cur = null; vimg.removeAttribute('src'); };
+    $id('vclose').onclick = closeViewer;
+    $id('vprev').onclick = () => { if (cur && cur.page > 1) showPage(cur, cur.page - 1); };
+    $id('vnext').onclick = () => { if (cur && (!cur.total || cur.page < cur.total)) showPage(cur, cur.page + 1); };
+    document.addEventListener('keydown', e => {
+      if (viewer.hidden) return;
+      if (e.key === 'Escape') closeViewer();
+      if (e.key === 'ArrowLeft') $id('vprev').click();
+      if (e.key === 'ArrowRight') $id('vnext').click();
+    });
+    document.addEventListener('click', e => {
+      const a = e.target.closest('a[data-pg]');
+      if (!a || e.ctrlKey || e.metaKey || e.shiftKey || e.button !== 0) return; // modified click: plain PDF link
+      e.preventDefault();
+      const [id, page, total, file, label] = a.dataset.pg.split('|');
+      showPage({ id, total: Number(total) || 0, file, label }, Number(page) || 1);
+      viewer.hidden = false;
+    });
+  </script>
+</body>
+</html>
